@@ -1,25 +1,49 @@
 import datetime as dt
 import pandas as pd
-
+import math
 
 class IndexModel:
-    def __init__(self) -> None:
+    def __init__(self, n_select: int = 3, weights: list[float] | None = None) -> None:
+
+
         self.start_level = 100.0
+
+        # load & clean prices
         df = pd.read_csv("data_sources/stock_prices.csv", parse_dates=["Date"], dayfirst=True)
         df["Date"] = pd.to_datetime(df["Date"], dayfirst=True)
         df = df.set_index("Date").sort_index()
+        df = df[df.index.weekday < 5].copy()  # keep weekdays only
 
-        df = df[df.index.weekday < 5].copy() #Ensures there is only weekdays in  the dataframe
-
+        # core attributes
         self.prices = df
-        self.stocks = [c for c in df.columns if c.startswith("Stock_")] #list of stocks where are going to use later
-
+        self.stocks = [c for c in df.columns if c.startswith("Stock_")]  # list of tickers
         self.index_values = None
         self._selection_debug = []
 
+        # ---- new: selection parameters ----
+        self.n_select = int(n_select)
+        if self.n_select < 1:
+            raise ValueError("n_select must be >= 1")
+        if self.n_select > len(self.stocks):
+            raise ValueError(f"n_select ({self.n_select}) exceeds available stocks ({len(self.stocks)}).")
+
+        if weights is None:
+            # default: equal-weights
+            self.weights = [1.0 / self.n_select] * self.n_select
+        else:
+            if len(weights) != self.n_select:
+                raise ValueError("weights length must equal n_select")
+            if any(w < 0 for w in weights):
+                raise ValueError("weights must be non-negative")
+            if not math.isclose(sum(weights), 1.0, rel_tol=1e-9, abs_tol=1e-9):
+                raise ValueError("weights must sum to 1.0")
+            self.weights = list(weights)
+
+        # sanity checks
         self._check_missing_weekdays()
         self._check_missing_prices()
         self._check_price_jumps(max_pct_jump=0.2)  # 20% threshold; adjust as needed
+
 
        
     def _check_missing_weekdays(self):
@@ -160,36 +184,45 @@ class IndexModel:
 
                 tmp = pd.DataFrame({"ticker": snap.index, "price": snap.values})
                 tmp = tmp.sort_values(by=["price", "ticker"], ascending=[False, True])
-                top3 = tmp["ticker"].iloc[:3].tolist()
-                weights = [0.5, 0.25, 0.25]
 
-                #print(f"[{today.date()}] Rebalance day:")
+                # pick top-N per params
+                topN = tmp["ticker"].iloc[: self.n_select].tolist()
+                if not topN:
+                    print(f"  Warning: no stocks available on snapshot {snapshot_date.date()}. Skipping rebalance.")
+                    continue
+
+                # weights per params (truncate if fewer than n_select, then renormalize to sum to 1)
+                w = list(self.weights[: len(topN)])
+                s = sum(w)
+                if s <= 0:
+                    w = [1.0 / len(topN)] * len(topN)
+                else:
+                    w = [x / s for x in w]
+
                 print(f"  Snapshot date: {snapshot_date.date()}")
-                print(f"  Top 3 stocks: {top3}")
-                #print(f"  Weights: {weights}")
+                print(f"  Top {len(topN)} stocks: {topN}")
+                # print(f"  Weights: {w}")
 
                 today_prices = self.prices.loc[today, self.stocks]
                 new_shares = {s: 0.0 for s in self.stocks}
-                for tkr, w in zip(top3, weights):
+                for tkr, ww in zip(topN, w):
                     p = today_prices[tkr]
                     if pd.isna(p) or p == 0:
                         raise ValueError(f"Wrong price for {tkr} on {today.date()}")
-                    new_shares[tkr] = (level * w) / p
+                    new_shares[tkr] = (level * ww) / p
 
                 pending_shares = new_shares
                 next_day = (self.prices.index[self.prices.index > today].min()
-                        if any(self.prices.index > today) else None)
-                #print(f"  New shares calculated; effective next BD: {next_day.date() if next_day else None}")
+                            if any(self.prices.index > today) else None)
 
-                #info for debugging
                 self._selection_debug.append({
                     "first_bd": today,
                     "snapshot": snapshot_date,
-                    "top3": top3,
-                    #"will_apply_on_next_day": True,
-                    "effective_from": (self.prices.index[self.prices.index > today].min()
-                                       if any(self.prices.index > today) else None)
+                    "topN": topN,
+                    "weights": w,
+                    "effective_from": next_day
                 })
+
 
         #index level, with all decimals
         self.index_values = pd.DataFrame(results)
@@ -201,5 +234,5 @@ class IndexModel:
             raise RuntimeError("Call calc_index_level(...) before export_values(...)")
         df = self.index_values.copy()
         df["Index_Level"] = df["Index_Level"].round(2)
-        #print(df)
-        df.to_csv(file_name, index=False)
+        print(df)
+        #df.to_csv(file_name, index=False)

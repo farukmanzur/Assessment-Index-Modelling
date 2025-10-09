@@ -234,5 +234,5 @@ class IndexModel:
             raise RuntimeError("Call calc_index_level(...) before export_values(...)")
         df = self.index_values.copy()
         df["Index_Level"] = df["Index_Level"].round(2)
-        print(df)
-        #df.to_csv(file_name, index=False)
+        #print(df)
+        df.to_csv(file_name, index=False)
